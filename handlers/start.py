@@ -1,76 +1,84 @@
 import asyncio
+import sqlite3
 import traceback
 
-from aiogram.dispatcher import *
-from aiogram.dispatcher.filters import *
+import aiogram.utils.exceptions
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters import CommandStart, CommandHelp
 from aiogram.dispatcher.filters.state import StatesGroup, State
-from aiogram.types import *
-from aiogram.utils.exceptions import *
+from aiogram.types import Message, CallbackQuery, ContentTypes
+from aiogram.utils.exceptions import ChatIdIsEmpty, BotBlocked
 
-from db.db_funcs import *
+from db.db_funcs import new_user, add_to_queue, search, update_conn_with, exit_queue, user_exists, check_queue, \
+    select_conn_with, select_conn_with_self, count, update_count
+from handlers.keyboards import start_keyboard, main_keyboard, about_keyboard, dialog_keyboard, after_dialog_keyboard
 from loader import dp, bot
 
 
-class Sex(StatesGroup):
+class Register(StatesGroup):
     sex = State()
 
 
-def main_board():
-    keyword = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    button_search = KeyboardButton('Start search🔍')
-    button_info_project = KeyboardButton('Info👜')
-    count_user = KeyboardButton(f"""There are already {count_users()} users in the bot🥳""")
-    keyword.add(button_search, button_info_project)
-    keyword.row(count_user)
-    return keyword
-
-
 @dp.message_handler(CommandStart(), state="*")
-async def start_bot(message: Message, state: FSMContext):
-    if users_exists(message.from_user.id) is False:
-        keyboard = InlineKeyboardMarkup(row_width=2)
-        boy = InlineKeyboardButton(text='Male', callback_data='male')
-        girl = InlineKeyboardButton(text='Female', callback_data='female')
-        keyboard = keyboard.add(boy, girl)
-        await message.answer(
-            text=f'Hello <a href="tg://user?id={message.from_user.id}">{message.from_user.full_name}</a>'
-                 f'\nAre you male or female?',
-            reply_markup=keyboard, parse_mode='html')
-        await Sex.sex.set()
-    elif users_exists(message.from_user.id) is True:
-        remove_from_queue(message.from_user.id)
-        await message.answer(text=(
-            f"Hello <a href=\"tg://user?id={message.from_user.id}\">{message.from_user.full_name}</a>\n"
-            f'/help - description of all bot commands.\n'
-            f'/start - start a dialogue.\n'
-            f'/rules - communication rules.'), reply_markup=main_board())
+async def start_bot(message: Message):
+    if user_exists(message.from_user.id) is False:
+        await message.answer(text="Hello dear user!"
+                                  "\nWhat's your sex", reply_markup=start_keyboard())
+        await Register.sex.set()
+    else:
+        await message.answer("/help - description of all commands.\n\n"
+                             "/search - start dialog.\n"
+                             "/stop - stop dialog.\n"
+                             "/sharelink - send partner link to your chat. (works only in dialog)\n\n"
+                             "/rules - rules of bot.", reply_markup=main_keyboard())
 
 
-@dp.callback_query_handler(state=Sex.sex)
-async def set_sex(call: CallbackQuery, state: FSMContext):
+@dp.callback_query_handler(state=Register.sex)
+async def end_reg(call: CallbackQuery, state: FSMContext):
     async with state.proxy() as data:
         data['sex'] = call.data
-    try:
-        new_user(call.from_user.id, call.from_user.username, data['sex'])
-        await call.message.delete()
-        await call.message.answer(
-            f'Welcome to the bot , <a href="tg://user?id={call.from_user.id}">{call.from_user.full_name}</a>\n'
-            f'🥳 You have successfully registered in our bot!\n'
-            f'\n'
-            f'/help - description of all bot commands.\n'
-            f'/start - start a dialogue.\n'
-            f'\n'
-            f'/rules - communication rules.', reply_markup=main_board())
-    except sqlite3.IntegrityError:
-        await call.message.edit_text(text=f'Hello '
-                                          f'<a href="tg://user?id={call.from_user.id}">{call.from_user.full_name}</a>')
+    new_user(call.from_user.id, call.from_user.username, data['sex'])
+    await call.message.delete()
+    await bot.send_message(call.from_user.id, text="/help - description of all commands.\n\n"
+                                                   "/search - start dialog.\n"
+                                                   "/stop - stop dialog.\n"
+                                                   "/sharelink - send partner link to your chat. (works only in dialog)\n\n"
+                                                   "/rules - rules of bot.", reply_markup=main_keyboard())
+    await bot.send_message(-687036958,
+                           f"New user registered : [{call.from_user.id}](tg://user?id={call.from_user.id})\n"
+                           f"Users in bot : {count()}", parse_mode="MarkdownV2")
+
+
+@dp.message_handler(CommandHelp(), state="*")
+async def bot_help(message: Message):
+    await message.answer("Help comm answer", reply_markup=main_keyboard())
+
+
+@dp.message_handler(text="Back", state="*")
+async def bot_back(message: Message, state: FSMContext):
     await state.finish()
+    await bot_help(message)
+
+
+@dp.message_handler(text="Cancel Search", state="*")
+async def cancel_search(message: Message, state: FSMContext):
+    await state.finish()
+    if check_queue(message.from_user.id) == "True":
+        exit_queue(message.from_user.id)
+        await message.answer("Searching has been canceled", reply_markup=main_keyboard())
+    elif check_queue(message.from_user.id) == "False":
+        await message.answer('You are not in search', reply_markup=main_keyboard())
+
+
+@dp.message_handler(text='All sorts of things👜', state='*')
+async def about(message: Message):
+    await message.answer(text='All info is there👇', reply_markup=about_keyboard())
 
 
 @dp.message_handler(commands=['rules'], state='*')
-@dp.message_handler(lambda message: message.text == 'Rules📖')
+@dp.message_handler(text='Rules📖', state='*')
 async def rules(message: Message):
-    await message.answer(f"📌Правила общения в @plmtstbot\n"
+    await message.answer(f"📌Rules of @plmtstbot\n"
                          f"1. Any mention of psychoactive substances. (drugs)\n"
                          f"2. Child pornography. (\"CP\")\n"
                          f"3. Fraud. (Scam)\n"
@@ -81,138 +89,248 @@ async def rules(message: Message):
                          f"8. Exchange, distribution of any 18+ materials")
 
 
+@dp.message_handler(commands=['about'], state='*')
+@dp.message_handler(text='About Project', state='*')
+async def project(message: Message):
+    await message.answer("Good project")
+
+
 class Dialog(StatesGroup):
     msg = State()
 
 
-@dp.message_handler(commands='help', state='*')
-async def help_bot(message: Message, state: FSMContext):
-    await state.finish()
-    await bot.send_message(message.from_user.id, text='/start\n/help\n/search')
-
-
-@dp.message_handler(commands=['search'], state='*')
-@dp.message_handler(lambda message: message.text == 'Start search🔍', state='*')
+@dp.message_handler(commands=['search'], state="*")
+@dp.message_handler(text="Start Search🔍", state="*")
 async def start_search(message: Message, state: FSMContext):
     try:
-        if queue_exists(message.from_user.id):
-            remove_from_queue(message.from_user.id)
-        add_to_queue(message.from_user.id, select_conn_with(message.from_user.id)[0][0])
+        if check_queue(message.from_user.id) is True:
+            exit_queue(message.from_user.id)
+        if select_conn_with(message.from_user.id) is not None:
+            update_conn_with(message.from_user.id, 'NULL')
+        add_to_queue(message.from_user.id)
+        await message.answer("Searching partner for you...", reply_markup=main_keyboard(is_search=True))
 
-        button_cancel = KeyboardButton(text="Cancel")
-        keyboard = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-        keyboard = keyboard.add(button_cancel)
-
-        await message.answer(text='Searching user fro you...', reply_markup=keyboard)
-
+        time_to_search = 0
         while True:
             await asyncio.sleep(0.5)
-            for_search = [message.from_user.id, None]
-            if search()[0] not in for_search:
+            time_to_search += 1
+
+            print(f"Time : [{time_to_search}] User : [{message.from_user.id}]")
+
+            if check_queue(message.from_user.id) == 'False':
+                break
+
+            if search() is not None and search() != message.from_user.id:
+
                 try:
-                    update_connection(search()[0], message.from_user.id)
-                    update_connection(message.from_user.id, search()[0])
+                    update_conn_with(message.from_user.id, search())
+                    update_conn_with(search(), message.from_user.id)
                     break
-                except Exception as e:
-                    print(e)
+                except Exception:
+                    print(traceback.format_exc())
+                    break
+
+            if time_to_search == 600:
+                try:
+                    await message.answer("Sorry, there are no available users at the moment.",
+                                         reply_markup=main_keyboard())
+                    exit_queue(message.from_user.id)
+                    break
+                except Exception:
+                    print(traceback.format_exc())
+                    break
 
         try:
-            remove_from_queue(message.from_user.id)
-            remove_from_queue(select_conn_with(message.from_user.id)[0][0])
-        except Exception as e:
-            print(e)
+            exit_queue(message.from_user.id)
+            exit_queue(select_conn_with(message.from_user.id)[0])
+        except sqlite3.OperationalError:
+            print(traceback.format_exc())
+        except Exception:
+            print(traceback.format_exc())
 
         await Dialog.msg.set()
 
-        button_cancel = KeyboardButton(text="❌Stop dialog")
-        button_link = KeyboardButton(text="🏹Share link")
-        markup = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-        markup = markup.add(button_link, button_cancel)
-        await bot.send_message(chat_id=select_conn_with(message.from_user.id)[0][0], text="Dialog started.",
-                               reply_markup=markup)
-        await bot.send_message(chat_id=message.from_user.id, text="Dialog started.",
-                               reply_markup=markup)
-        return
+        await bot.send_message(select_conn_with(message.from_user.id)[0],
+                               text="Dialog started\n"
+                                    "/next - next dialog\n"
+                                    "/stop - stop dialog\n"
+                                    "/sharelink - share yourself",
+                               reply_markup=dialog_keyboard())
+        await message.answer("Dialog started\n"
+                             "/next - next dialog\n"
+                             "/stop - stop dialog\n"
+                             "/sharelink - share yourself",
+                             reply_markup=dialog_keyboard())
+
     except Exception:
         print(traceback.format_exc())
 
 
-@dp.message_handler(state=Dialog.msg)
-@dp.message_handler(content_types=ContentTypes.TEXT)
-async def chatting(message: Message, state: FSMContext):
+@dp.message_handler(content_types=ContentTypes.TEXT, state=Dialog.msg)
+async def chatting_text(message: Message, state: FSMContext):
     try:
-        button_next = KeyboardButton('➡️Next Dialog')
-        button_cancel = KeyboardButton('Cancel')
-        menu_msg_chatting = ReplyKeyboardMarkup(resize_keyboard=True)
-        menu_msg_chatting.add(button_cancel, button_next)
+        async with state.proxy() as data:
+            data['msg'] = message.text
 
-        await state.update_data(msg=message.text)
-        user_data = await state.get_data()
+        if data['msg'] == "❌Stop Dialog❌" or data['msg'] == "/stop":
+            await bot.send_message(select_conn_with(message.from_user.id)[0], "Dialog stopped",
+                                   reply_markup=after_dialog_keyboard())
+            await bot.send_message(message.from_user.id, "Dialog stopped", reply_markup=after_dialog_keyboard())
+            update_conn_with(select_conn_with(message.from_user.id)[0], 'NULL')
+            update_conn_with(message.from_user.id, 'NULL')
 
-        if user_data['msg'] == '❌Stop dialog':
-            await message.answer('Диалог закончился!', reply_markup=menu_msg_chatting)
-            await bot.send_message(select_conn_with(message.from_user.id)[0][0], 'Диалог закончился!',
-                                   reply_markup=menu_msg_chatting)
-            update_connection(select_conn_with(message.from_user.id)[0][0], 'NULL')
-            update_connection(message.from_user.id, 'NULL')
+        elif data['msg'] == "🏹Share link🏹" or data['msg'] == "/sharelink":
+            if message.from_user.username is not None:
+                await bot.send_message(select_conn_with_self(message.from_user.id)[0],
+                                       text=f"<a href='tg://user?id={message.from_user.id}'>Your partner has shared link</a>",
+                                       parse_mode='html')
+                await message.answer(
+                    text=f"<a href='tg://user?id={message.from_user.id}'>Your partner has shared link</a>\n",
+                    parse_mode='html')
+            elif message.from_user.username is None:
+                await message.answer("You don't have user name to share link.")
 
-        elif user_data['msg'] == '🏹Share link':
-            if message.from_user.username is None:
-                await bot.send_message(select_conn_with_self(message.from_user.id)[0][0], 'Username is empty.')
-            else:
-                await bot.send_message(select_conn_with_self(message.from_user.id)[0][0],
-                                       "@" + message.from_user.username)
-                await message.answer('@' + message.from_user.username)
-
-        elif user_data['msg'] == '➡️Next Dialog':
+        elif data['msg'] == "➡️Next Dialog" or data['msg'] == "/next":
+            if select_conn_with(message.from_user.id) is not None:
+                try:
+                    await bot.send_message(select_conn_with(message.from_user.id)[0], "Dialog stopped",
+                                           reply_markup=after_dialog_keyboard())
+                except aiogram.utils.exceptions.ChatIdIsEmpty:
+                    pass
+                try:
+                    update_conn_with(select_conn_with(message.from_user.id)[0], 'NULL')
+                    update_conn_with(message.from_user.id, 'NULL')
+                except sqlite3.OperationalError:
+                    pass
+            await state.finish()
             await start_search(message, state)
 
-        elif user_data['msg'] == 'Cancel':
+        elif data['msg'] == "Back":
             await state.finish()
-            await back(message, state)
+            await start_bot(message)
 
-        else:
-            await bot.send_message(select_conn_with(message.from_user.id)[0][0], user_data['msg'])
+        elif await state.get_state() == "Dialog:msg" and message.content_type == "text":
+            await bot.send_message(select_conn_with(message.from_user.id)[0], text=data['msg'])
+            update_count(message.from_user.id)
 
-    except ChatIdIsEmpty:
-        print(traceback.format_exc())
-        await state.finish()
-        await help_bot(message, state)
-        print("aa")
     except BotBlocked:
-        await message.answer("User left chat.")
         await state.finish()
-        await start_bot(message, state)
+        await message.answer("User left chat...", reply_markup=main_keyboard())
+        try:
+            update_conn_with(select_conn_with(message.from_user.id)[0], 'NULL')
+            update_conn_with(message.from_user.id, 'NULL')
+        except sqlite3.OperationalError:
+            pass
+
     except Exception:
         print(traceback.format_exc())
 
 
-@dp.message_handler(content_types=ContentTypes.PHOTO)
-@dp.message_handler(state=Dialog.msg)
+@dp.message_handler(content_types=ContentTypes.PHOTO, state=Dialog.msg)
 async def chatting_photo(message: Message, state: FSMContext):
     try:
-        await bot.send_photo(select_conn_with(message.from_user.id)[0][0], message.photo[0].file_id,
+        await bot.send_photo(select_conn_with(message.from_user.id)[0], message.photo[0].file_id,
                              caption=message.text)
+        update_count(message.from_user.id)
     except Exception:
         print(traceback.format_exc())
 
 
-@dp.message_handler(content_types=ContentTypes.STICKER)
-@dp.message_handler(state=Dialog.msg)
+@dp.message_handler(content_types=ContentTypes.STICKER, state=Dialog.msg)
 async def chatting_sticker(message: Message, state: FSMContext):
     try:
-        await bot.send_sticker(select_conn_with(message.from_user.id)[0][0], message.sticker.file_id)
+        await bot.send_sticker(select_conn_with(message.from_user.id)[0], message.sticker.file_id)
+        update_count(message.from_user.id)
     except Exception:
         print(traceback.format_exc())
 
 
-@dp.message_handler(commands=['cancel'], state="*")
-@dp.message_handler(lambda message: message.text == 'Cancel', state="*")
-async def back(message: Message, state: FSMContext):
-    await state.finish()
-    await start_bot(message, state)
+@dp.message_handler(content_types=ContentTypes.VOICE, state=Dialog.msg)
+async def chatting_voice(message: Message, state: FSMContext):
+    try:
+        await bot.send_voice(select_conn_with(message.from_user.id)[0], message.voice.file_id)
+        update_count(message.from_user.id)
+    except Exception:
+        print(traceback.format_exc())
+
+
+@dp.message_handler(content_types=ContentTypes.VIDEO, state=Dialog.msg)
+async def chatting_voice(message: Message, state: FSMContext):
+    try:
+        await bot.send_video(select_conn_with(message.from_user.id)[0], message.video.file_id)
+        update_count(message.from_user.id)
+    except Exception:
+        print(traceback.format_exc())
+
+
+@dp.message_handler(content_types=ContentTypes.VIDEO_NOTE, state=Dialog.msg)
+async def chatting_voice(message: Message, state: FSMContext):
+    try:
+        await bot.send_video_note(select_conn_with(message.from_user.id)[0], message.video_note.file_id)
+        update_count(message.from_user.id)
+    except Exception:
+        print(traceback.format_exc())
+
+
+@dp.message_handler(content_types=ContentTypes.CONTACT, state=Dialog.msg)
+async def chatting_voice(message: Message, state: FSMContext):
+    try:
+        await bot.send_contact(select_conn_with(message.from_user.id)[0],
+                               vcard=message.contact.vcard,
+                               phone_number=message.contact.phone_number,
+                               first_name=message.contact.first_name,
+                               last_name=message.contact.last_name, )
+        update_count(message.from_user.id)
+    except Exception:
+        print(traceback.format_exc())
+
+
+@dp.message_handler(content_types=ContentTypes.DOCUMENT, state=Dialog.msg)
+async def chatting_voice(message: Message, state: FSMContext):
+    try:
+        await bot.send_document(select_conn_with(message.from_user.id)[0], message.document.file_id)
+        update_count(message.from_user.id)
+    except Exception:
+        print(traceback.format_exc())
+
+
+@dp.message_handler(content_types=ContentTypes.DICE, state=Dialog.msg)
+async def chatting_voice(message: Message, state: FSMContext):
+    try:
+        await bot.send_dice(select_conn_with(message.from_user.id)[0], message.dice.value)
+        update_count(message.from_user.id)
+    except Exception:
+        print(traceback.format_exc())
+
+
+@dp.message_handler(content_types=ContentTypes.LOCATION, state=Dialog.msg)
+async def chatting_voice(message: Message, state: FSMContext):
+    try:
+        await bot.send_location(select_conn_with(message.from_user.id)[0],
+                                longitude=message.location.longitude,
+                                latitude=message.location.latitude,
+                                live_period=message.location.live_period,
+                                proximity_alert_radius=message.location.proximity_alert_radius,
+                                heading=message.location.heading,
+                                horizontal_accuracy=message.location.horizontal_accuracy)
+        update_count(message.from_user.id)
+    except Exception:
+        print(traceback.format_exc())
+
+
+@dp.message_handler(content_types=ContentTypes.VENUE, state=Dialog.msg)
+async def chatting_voice(message: Message, state: FSMContext):
+    try:
+        await bot.send_venue(select_conn_with(message.from_user.id)[0],
+                             latitude=message.venue.location.latitude,
+                             longitude=message.venue.location.longitude,
+                             title=message.venue.title,
+                             address=message.venue.address, )
+        update_count(message.from_user.id)
+    except Exception:
+        print(traceback.format_exc())
 
 
 @dp.message_handler()
-async def end(message: Message):
-    await message.answer('Я не знаю, что с этим делать')
+async def err_handler(message: Message):
+    await message.answer("Unknown command")
